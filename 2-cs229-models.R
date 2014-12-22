@@ -11,6 +11,9 @@ options(max.print=1000)
 
 setwd('~/Data/CT/Yaan')
 
+############################################################
+# load data
+
 dyads3 <- readRDS('Rds/dyad-statistics2.Rds')
 
 set.seed(1)
@@ -26,6 +29,9 @@ dyads3[, first_call := call.order == 1]
 
 dyads3[, same_famid := as.numeric(same_famid)]
 dyads3[, first_call := as.numeric(first_call)]
+
+############################################################
+# build RHS of models
 
 rhs1 <- apply(expand.grid(c('egocall','altercall','egotext','altertext'),
                           c('','_na')),
@@ -44,6 +50,7 @@ rhs3 <- c(rhs2,rhs3)
 svm.crit <- 0.002
 
 
+############################################################
 # logistic models
 
 m1 <- glm(reformulate(rhs1,'same_famid'),
@@ -71,8 +78,9 @@ m6 <- glm(reformulate(rhs3,'first_call'),
           data=dyads3[rselect < 0.5], family=binomial)
 summary(m6)
 
-
+############################################################
 # short logistic regressions
+
 lgt.m1 <- glm(reformulate(rhs1,'same_famid'),
               data=dyads3[rselect < svm.crit], family=binomial)
 lgt.m2 <- glm(reformulate(rhs2,'same_famid'),
@@ -102,6 +110,9 @@ if (FALSE) {
     m5 <- readRDS('Rds/logit-m5.Rds')
     m6 <- readRDS('Rds/logit-m6.Rds')
 }
+
+############################################################
+# prediction and error analysis functions
 
 # predictions
 ctable <- function(pred,true) {
@@ -147,6 +158,9 @@ error.func <- function(mod,y,crit=0.5,rhs=names(dyads3),
          train.ctable=train.t, test.ctable=test.t)
 }
 
+############################################################
+# logit error analysis
+
 m1.errs <- error.func(m1,'same_famid')
 m2.errs <- error.func(m2,'same_famid')
 m3.errs <- error.func(m3,'same_famid')
@@ -163,7 +177,11 @@ lgt.m4.errs <- error.func(lgt.m4,'first_call',svm.crit)
 lgt.m5.errs <- error.func(lgt.m5,'first_call',svm.crit)
 lgt.m6.errs <- error.func(lgt.m6,'first_call',svm.crit)
 
-# grid parameter selection
+
+############################################################
+# SVM parameter selection
+
+# grid parameter selection function
 param.crit <- 0.001
 grid.func <- function(target,...) {
     ptm <- proc.time()
@@ -177,7 +195,8 @@ grid.func <- function(target,...) {
     res <- c(list(...),
 #              acc=svm.mparam$tot.accuracy,
              acc=err$test.rmse,
-             f1=err$test.f1)
+             f1=err$test.f1,
+             recall=err$test.ctable[2,2]/(err$test.ctable[1,2] + err$test.ctable[2,2]))
     do.call(cat,
             c(t1[3],t2[3] - t1[3],'::',
               res,'\n'))
@@ -196,26 +215,42 @@ system.time(res <- do.call(mcmapply,
                c(function(...) grid.func(target='same_famid',...),
                  mc.cores=22,as.list(pgrid))))
 svm.rbf.sf <- as.data.table(t(res))
+svm.rbf.sf <- svm.rbf.sf[,lapply(.SD,as.numeric)]
 saveRDS(svm.rbf.sf,'Rds/svmgrid_rbf_sf.Rds')
 
-# SVM sigmoid parameter selection
 system.time(res <- do.call(mcmapply,
                c(function(...) grid.func(target='first_call',...),
                  mc.cores=22,as.list(pgrid))))
 svm.rbf.fc <- as.data.table(t(res))
+svm.rbf.fc <- svm.rbf.fc[,lapply(.SD,as.numeric)]
 saveRDS(svm.rbf.fc,'Rds/svmgrid_rbf_fc.Rds')
 
+# SVM sigmoid parameter selection
 system.time(res <- do.call(mcmapply,
                c(function(...) grid.func(target='same_famid',...),
                  mc.cores=22,as.list(pgrid.sigmoid))))
 svm.sig.sf <- as.data.table(t(res))
+svm.sig.sf <- svm.sig.sf[,lapply(.SD,as.numeric)]
 saveRDS(svm.sig.sf,'Rds/svmgrid_sig_sf.Rds')
 
 system.time(res <- do.call(mcmapply,
                c(function(...) grid.func(target='first_call',...),
                  mc.cores=22,as.list(pgrid.sigmoid))))
 svm.sig.fc <- as.data.table(t(res))
-saveRDS(svm.sig.sf,'Rds/svmgrid_sig_sf.Rds')
+svm.sig.fc <- svm.sig.fc[,lapply(.SD,as.numeric)]
+saveRDS(svm.sig.fc,'Rds/svmgrid_sig_fc.Rds')
+
+if(FALSE) {
+    svm.rbf.sf <- readRDS('Rds/svmgrid_rbf_sf.Rds')
+    svm.rbf.fc <- readRDS('Rds/svmgrid_rbf_fc.Rds')
+    svm.sig.sf <- readRDS('Rds/svmgrid_sig_sf.Rds')
+    svm.sig.fc <- readRDS('Rds/svmgrid_sig_fc.Rds')
+}
+
+txtplot(svm.rbf.sf$acc,svm.rbf.sf$recall)
+txtplot(svm.rbf.fc$acc,svm.rbf.fc$recall)
+txtplot(svm.sig.sf$acc,svm.sig.sf$recall)
+txtplot(svm.sig.fc$acc,svm.sig.fc$recall)
 
 res <- mclapply(1:nrow(pgrid),
                 mc.cores=20,
@@ -264,30 +299,97 @@ Csearch.sigmoid <- as.data.table(Csearch.sigmoid)
 txtplot(log10(Csearch.sigmoid$C),Csearch.sigmoid$acc)
 txtplot(Csearch.sigmoid$gamma,Csearch.sigmoid$acc)
 
-best.idx <- which.max(Csearch$acc)
-cost <- Csearch[best.idx,C]
-gamma <- Csearch[best.idx,gamma]
+
+############################################################
+# full model at optimal SVM settings
+
+# what optimality condition?
+# lowest RMSE or highest F1? F1 guarantees having at least some predictions
+
+svm.rbf.sf.best <- order(-svm.rbf.sf$recall,svm.rbf.sf$acc)[1]
+svm.rbf.sf.C <- svm.rbf.sf[svm.rbf.sf.best,C]
+svm.rbf.sf.gamma <- svm.rbf.sf[svm.rbf.sf.best,gamma]
+
+svm.rbf.fc.best <- order(-svm.rbf.fc$recall,svm.rbf.fc$acc)[1]
+svm.rbf.fc.C <- svm.rbf.fc[svm.rbf.fc.best,C]
+svm.rbf.fc.gamma <- svm.rbf.fc[svm.rbf.fc.best,gamma]
+
+svm.sig.sf.best <- order(-svm.sig.sf$recall,svm.sig.sf$acc)[1]
+svm.sig.sf.C <- svm.sig.sf[svm.sig.sf.best,C]
+svm.sig.sf.gamma <- svm.sig.sf[svm.sig.sf.best,gamma]
+svm.sig.sf.coef0 <- svm.sig.sf[svm.sig.sf.best,coef0]
+
+svm.sig.fc.best <- order(-svm.sig.fc$recall,svm.sig.fc$acc)[1]
+svm.sig.fc.C <- svm.sig.fc[svm.sig.fc.best,C]
+svm.sig.fc.gamma <- svm.sig.fc[svm.sig.fc.best,gamma]
+svm.sig.fc.coef0 <- svm.sig.fc[svm.sig.fc.best,coef0]
 
 # svm models
 system.time(svm.m1 <- svm(reformulate(rhs1,'same_famid'),
                           data=dyads3[rselect < svm.crit],
-                          cost=cost,gamma=gamma,type='C-classification'))
+                          cost=svm.rbf.sf.C,
+                          gamma=svm.rbf.sf.gamma,
+                          type='C-classification'))
 system.time(svm.m2 <- svm(reformulate(rhs2,'same_famid'),
                           data=dyads3[rselect < svm.crit],
-                          cost=cost,gamma=gamma,type='C-classification'))
+                          cost=svm.rbf.sf.C,
+                          gamma=svm.rbf.sf.gamma,
+                          type='C-classification'))
 system.time(svm.m3 <- svm(reformulate(rhs3,'same_famid'),
                           data=dyads3[rselect < svm.crit],
-                          cost=cost,gamma=gamma,type='C-classification'))
+                          cost=svm.rbf.sf.C,
+                          gamma=svm.rbf.sf.gamma,
+                          type='C-classification'))
 
 system.time(svm.m4 <- svm(reformulate(rhs1,'first_call'),
                           data=dyads3[rselect < svm.crit],
-                          cost=cost,gamma=gamma,type='C-classification'))
+                          cost=svm.rbf.fc.C,
+                          gamma=svm.rbf.fc.gamma,
+                          type='C-classification'))
 system.time(svm.m5 <- svm(reformulate(rhs2,'first_call'),
                           data=dyads3[rselect < svm.crit],
-                          cost=cost,gamma=gamma,type='C-classification'))
+                          cost=svm.rbf.fc.C,
+                          gamma=svm.rbf.fc.gamma,
+                          type='C-classification'))
 system.time(svm.m6 <- svm(reformulate(rhs3,'first_call'),
                           data=dyads3[rselect < svm.crit],
-                          cost=cost,gamma=gamma,type='C-classification'))
+                          cost=svm.rbf.fc.C,
+                          gamma=svm.rbf.fc.gamma,
+                          type='C-classification'))
+
+# svm sigmoid models
+system.time(svm.sig.m1 <- svm(reformulate(rhs1,'same_famid'),
+                          data=dyads3[rselect < svm.crit],
+                          cost=svm.sig.sf.C,
+                          gamma=svm.sig.sf.gamma,
+                          type='C-classification'))
+system.time(svm.sig.m2 <- svm(reformulate(rhs2,'same_famid'),
+                          data=dyads3[rselect < svm.crit],
+                          cost=svm.sig.sf.C,
+                          gamma=svm.sig.sf.gamma,
+                          type='C-classification'))
+system.time(svm.sig.m3 <- svm(reformulate(rhs3,'same_famid'),
+                          data=dyads3[rselect < svm.crit],
+                          cost=svm.sig.sf.C,
+                          gamma=svm.sig.sf.gamma,
+                          type='C-classification'))
+
+system.time(svm.sig.m4 <- svm(reformulate(rhs1,'first_call'),
+                          data=dyads3[rselect < svm.crit],
+                          cost=svm.sig.fc.C,
+                          gamma=svm.sig.fc.gamma,
+                          type='C-classification'))
+system.time(svm.sig.m5 <- svm(reformulate(rhs2,'first_call'),
+                          data=dyads3[rselect < svm.crit],
+                          cost=svm.sig.fc.C,
+                          gamma=svm.sig.fc.gamma,
+                          type='C-classification'))
+system.time(svm.sig.m6 <- svm(reformulate(rhs3,'first_call'),
+                          data=dyads3[rselect < svm.crit],
+                          cost=svm.sig.fc.C,
+                          gamma=svm.sig.fc.gamma,
+                          type='C-classification'))
+
 
 svm.m1.errs <- error.func(svm.m1,'same_famid',svm.crit,rhs1)
 svm.m2.errs <- error.func(svm.m2,'same_famid',svm.crit,rhs2)
@@ -297,16 +399,25 @@ svm.m4.errs <- error.func(svm.m4,'first_call',svm.crit,rhs1)
 svm.m5.errs <- error.func(svm.m5,'first_call',svm.crit,rhs2)
 svm.m6.errs <- error.func(svm.m6,'first_call',svm.crit,rhs3)
 
+svm.sig.m1.errs <- error.func(svm.sig.m1,'same_famid',svm.crit,rhs1)
+svm.sig.m2.errs <- error.func(svm.sig.m2,'same_famid',svm.crit,rhs2)
+svm.sig.m3.errs <- error.func(svm.sig.m3,'same_famid',svm.crit,rhs3)
+
+svm.sig.m4.errs <- error.func(svm.sig.m4,'first_call',svm.crit,rhs1)
+svm.sig.m5.errs <- error.func(svm.sig.m5,'first_call',svm.crit,rhs2)
+svm.sig.m6.errs <- error.func(svm.sig.m6,'first_call',svm.crit,rhs3)
+
 
 
 # summaries
-all.models <- CJ(type=c('lgt','svm'),m=1:3)
-all.models <- rbind(all.models,CJ(type=c('lgt','svm'),m=4:6))
+all.models <- CJ(type=c('lgt','svm','svm.sig'),m=1:3)
+all.models <- rbind(all.models,CJ(type=c('lgt','svm','svm.sig'),m=4:6))
 all.models[,mname := paste0(type,'.m',m,'.errs')]
 
 msums <- sapply(all.models$mname, function(x) {
     moderrs <- get(x)
-    c(train=moderrs$train.rmse,test=moderrs$test.rmse)
+    c(train=moderrs$train.rmse,test=moderrs$test.rmse,
+      recall=moderrs$test.ctable[2,2]/(moderrs$test.ctable[1,2] + moderrs$test.ctable[2,2]))
 })
 msums <- t(msums)
 
@@ -317,6 +428,9 @@ lgt.m123 <- cbind(lgt.m1.errs$test.ctable,
 svm.m123 <- cbind(svm.m1.errs$test.ctable,
                   svm.m2.errs$test.ctable,
                   svm.m3.errs$test.ctable)
+svm.sig.m123 <- cbind(svm.sig.m1.errs$test.ctable,
+                      svm.sig.m2.errs$test.ctable,
+                      svm.sig.m3.errs$test.ctable)
 
 lgt.m456 <- cbind(lgt.m4.errs$test.ctable,
                   lgt.m5.errs$test.ctable,
@@ -324,18 +438,22 @@ lgt.m456 <- cbind(lgt.m4.errs$test.ctable,
 svm.m456 <- cbind(svm.m4.errs$test.ctable,
                   svm.m5.errs$test.ctable,
                   svm.m6.errs$test.ctable)
+svm.sig.m456 <- cbind(svm.sig.m4.errs$test.ctable,
+                      svm.sig.m5.errs$test.ctable,
+                      svm.sig.m6.errs$test.ctable)
 
-ctable.m123 <- rbind(lgt.m123,svm.m123)
-ctable.m456 <- rbind(lgt.m456,svm.m456)
+ctable.m123 <- rbind(lgt.m123,svm.m123,svm.sig.m123)
+ctable.m456 <- rbind(lgt.m456,svm.m456,svm.sig.m456)
 
 # add names and shit
 colnames(ctable.m123) <- paste0('M',rep(1:3,each=2),':T',rep(0:1,3))
-rownames(ctable.m123) <- paste0(rep(c('Logit','SVM'),each=2),':P',rep(0:1,2))
+rownames(ctable.m123) <- paste0(rep(c('Logit','SVM (rbf)', 'SVM (sigmoid)'),each=2),':P',rep(0:1,3))
 
 colnames(ctable.m456) <- paste0('M',rep(4:6,each=2),':T',rep(0:1,3))
-rownames(ctable.m456) <- paste0(rep(c('Logit','SVM'),each=2),':P',rep(0:1,2))
+rownames(ctable.m456) <- paste0(rep(c('Logit','SVM (rbf)','SVM (sigmoid)'),each=2),':P',rep(0:1,3))
 
 
+############################################################
 # network graphs
 test.pred <- predict(svm.m3,newdata=dyads3[rselect > 1-svm.crit,rhs3,with=FALSE])
 test.pred <- as.numeric(test.pred==1)
